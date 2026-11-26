@@ -12,20 +12,29 @@ namespace Ron1n.Mode;
 public sealed partial class HomeWindow
 {
     private static readonly string[] SettingsCategories = ["Libreria", "Schermo e audio", "Comandi", "Avvio", "Aggiornamenti"];
+    private static readonly string[] SettingsIcons = ["\uE8B7", "\uE7F4", "\uE7FC", "\uE7E8", "\uE895"];
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "ConsoleMode";
 
     private void OpenSettings(object sender, RoutedEventArgs e)
     {
         if (_dialog) return;
+        _hoverTimer?.Stop();
         Home.Visibility = Visibility.Collapsed;
         Settings.Visibility = Visibility.Visible;
         if (Categories.Items.Count == 0)
-            foreach (var title in SettingsCategories)
-                Categories.Items.Add(new ListViewItem { Content = title, MinHeight = 50 });
+            for (var index = 0; index < SettingsCategories.Length; index++)
+            {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+                row.Children.Add(new FontIcon { Glyph = SettingsIcons[index], FontSize = 18 });
+                row.Children.Add(new TextBlock { Text = SettingsCategories[index], VerticalAlignment = VerticalAlignment.Center });
+                var item = new ListViewItem { Content = row, MinHeight = 54 };
+                AutomationProperties.SetName(item, SettingsCategories[index]);
+                Categories.Items.Add(item);
+            }
         if (Categories.SelectedIndex < 0) Categories.SelectedIndex = 0;
         else RenderSettings();
-        if (Categories.SelectedItem is Control item) item.Focus(FocusState.Programmatic);
+        if (Categories.SelectedItem is Control selectedItem) selectedItem.Focus(FocusState.Programmatic);
     }
 
     private void CloseSettings(object sender, RoutedEventArgs e)
@@ -147,6 +156,7 @@ public sealed partial class HomeWindow
     private void AddSettingAction(string title, Func<Task> action)
     {
         var button = new Button { Content = title, Padding = new Thickness(16, 9, 16, 9) };
+        AddInteractionMotion(button, 1.025);
         button.Click += async (_, _) => await RunAction(action);
         SettingsRows.Children.Add(button);
     }
@@ -298,7 +308,8 @@ public sealed partial class HomeWindow
         _artwork?.Cancel();
         if (game is null || _session is not null || _dialog) return;
         var art = _preferences.For(game);
-        if (art.ArtworkId is not null || art.CatalogId.Length > 0 || !_fetched.Add(game.Id)) return;
+        var hasCatalog = art.ArtworkId is not null || art.CatalogId.Length > 0;
+        if ((hasCatalog && File.Exists(art.Background)) || !_fetched.Add(game.Id)) return;
         var lookup = new CancellationTokenSource();
         _artwork = lookup;
         _ = AutoArtwork(game, lookup);
@@ -309,7 +320,10 @@ public sealed partial class HomeWindow
         try
         {
             await Task.Delay(650, lookup.Token);
-            var match = game.SteamId is { } id ? new ArtworkMatch(id, game.Title) : null;
+            var art = _preferences.For(game);
+            var match = art.CatalogId.StartsWith("wikipedia:", StringComparison.Ordinal)
+                ? new ArtworkMatch(null, game.Title, art.CatalogId["wikipedia:".Length..], art.Description)
+                : (art.ArtworkId ?? game.SteamId) is { } id ? new ArtworkMatch(id, game.Title) : null;
             if (match is null)
             {
                 var found = await GameCatalog.SearchAsync(game.Title, lookup.Token);

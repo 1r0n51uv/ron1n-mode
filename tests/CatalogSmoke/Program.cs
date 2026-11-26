@@ -13,5 +13,10 @@ foreach (var query in new[] { "Pokemon Pokopia", "Pokémon Pokopia" })
     var image = await GameCatalog.DownloadAsync(artwork.Cover, CancellationToken.None);
     if (image is null) throw new InvalidOperationException($"Copertina non scaricabile per {query}.");
     File.Delete(image);
-    Console.WriteLine($"{query}: titolo, descrizione e copertina verificati.");
+    if (artwork.Background is null || artwork.Background == artwork.Cover)
+        throw new InvalidOperationException($"Sfondo ufficiale non trovato per {query}.");
+    var background = await GameCatalog.DownloadAsync(artwork.Background, CancellationToken.None);
+    if (background is null) throw new InvalidOperationException($"Sfondo non scaricabile per {query}.");
+    File.Delete(background);
+    Console.WriteLine($"{query}: titolo, descrizione, copertina e sfondo verificati.");
 }

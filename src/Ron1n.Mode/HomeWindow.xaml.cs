@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Numerics;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
@@ -7,7 +9,6 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics;
 using VirtualKey = Windows.System.VirtualKey;
@@ -49,6 +50,12 @@ public sealed partial class HomeWindow : Window
         _sessionTimer.Interval = TimeSpan.FromMilliseconds(750);
         _sessionTimer.Tick += (_, _) => PollSession();
         Root.KeyDown += OnKey;
+        foreach (var action in new[] { Play, More, SettingsAction, DesktopAction, SettingsBack }) AddInteractionMotion(action);
+        Root.SizeChanged += (_, args) =>
+        {
+            Home.Padding = new Thickness(args.NewSize.Width < 900 ? 26 : 46, 24, args.NewSize.Width < 900 ? 26 : 46, 18);
+            TitleText.FontSize = Math.Clamp(args.NewSize.Height * .105, 36, 72);
+        };
         Root.Loaded += async (_, _) =>
         {
             if (_initialized) return;
@@ -62,6 +69,7 @@ public sealed partial class HomeWindow : Window
         {
             _closed = true;
             _artwork?.Cancel();
+            _hoverTimer?.Stop();
             _input.Stop();
             _sessionTimer.Stop();
             _session?.Dispose();
@@ -133,13 +141,22 @@ public sealed partial class HomeWindow : Window
 
     private void PopulateCards()
     {
+        _hoverTimer?.Stop();
         Cards.Children.Clear();
         _tiles.Clear();
         for (var index = 0; index < _games.Count; index++)
         {
             var game = _games[index];
             var position = index;
-            var tile = new Button { Width = 130, Height = 103, CornerRadius = new CornerRadius(12) };
+            var tile = new Button { Width = 160, Height = 104, CornerRadius = new CornerRadius(12), Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+            AddInteractionMotion(tile, 1.065);
+            tile.PointerEntered += (_, args) =>
+            {
+                if (args.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+                ScheduleHoverPreview(position);
+            };
+            tile.PointerExited += (_, _) => CancelHoverPreview(position);
             AutomationProperties.SetName(tile, game.Title);
             ToolTipService.SetToolTip(tile, game.Title);
             tile.Click += (_, _) => { if (_selected == position) StartOrResume(); else Select(position); };
@@ -147,18 +164,46 @@ public sealed partial class HomeWindow : Window
             _tiles.Add(tile);
             Cards.Children.Add(tile);
         }
-        var add = new Button { Content = "+", Width = 54, Height = 54 };
+        var add = new Button
+        {
+            Content = new FontIcon { Glyph = "\uE710", FontSize = 20 },
+            Width = 59, Height = 59, VerticalAlignment = VerticalAlignment.Center
+        };
+        AddInteractionMotion(add);
         AutomationProperties.SetName(add, "Aggiungi un gioco");
         add.Click += async (_, _) => await AddManual();
         Cards.Children.Add(add);
     }
 
-    private void Select(int index)
+    private DispatcherQueueTimer? _hoverTimer;
+    private int _hoverIndex = -1;
+
+    private void ScheduleHoverPreview(int index)
+    {
+        if (_hoverTimer is null)
+        {
+            _hoverTimer = DispatcherQueue.CreateTimer();
+            _hoverTimer.Interval = TimeSpan.FromMilliseconds(130);
+            _hoverTimer.IsRepeating = false;
+            _hoverTimer.Tick += (_, _) => Select(_hoverIndex, scroll: false);
+        }
+        _hoverIndex = index;
+        _hoverTimer.Start();
+    }
+
+    private void CancelHoverPreview(int index)
+    {
+        if (_hoverIndex != index) return;
+        _hoverTimer?.Stop();
+        _hoverIndex = -1;
+    }
+
+    private void Select(int index, bool scroll = true)
     {
         if (index < 0 || index >= _games.Count || index == _selected) return;
         _selected = index;
         UpdateHero();
-        _tiles[index].StartBringIntoView();
+        if (scroll) _tiles[index].StartBringIntoView();
     }
 
     private void FocusSelection()
@@ -192,17 +237,14 @@ public sealed partial class HomeWindow : Window
         }
         More.Visibility = item is null ? Visibility.Collapsed : Visibility.Visible;
         var running = item is not null && _session?.Game.Id == item.Id;
-        Play.Content = item is null ? "Aggiungi gioco" : running ? "Riprendi" : "Gioca";
+        PlayLabel.Text = item is null ? "Aggiungi gioco" : running ? "Riprendi" : "Gioca";
+        PlayIcon.Glyph = item is null ? "\uE710" : "\uE768";
+        AutomationProperties.SetName(Play, PlayLabel.Text);
         SessionStatus.Text = running ? "In esecuzione" : _session is null ? "" : _session.Game.Title + " · In esecuzione";
         SessionStatus.Visibility = SessionStatus.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         var background = File.Exists(art?.Background) ? art!.Background : null;
-        if (_backgroundPath != background)
-        {
-            _backgroundPath = background;
-            Backdrop.Source = LoadImage(background, 1920);
-            Fade(Backdrop, .2, .76);
-        }
-        if (animate) Fade(Hero, .64, 1);
+        ShowBackdrop(background);
+        if (animate) AnimateHero();
         _ = UpdatePaletteAsync(background ?? art?.Card, item?.Id);
         for (var index = 0; index < _tiles.Count; index++)
         {
@@ -213,16 +255,7 @@ public sealed partial class HomeWindow : Window
             if (card.Content is not null && card.Tag as string == path) continue;
             card.Tag = path;
             var image = LoadImage(path, 260);
-            if (image is not null)
-            {
-                card.Background = new ImageBrush { ImageSource = image, Stretch = Stretch.UniformToFill };
-                card.Content = "";
-            }
-            else
-            {
-                card.ClearValue(Control.BackgroundProperty);
-                card.Content = new TextBlock { Text = _games[index].Title, TextWrapping = TextWrapping.Wrap, MaxLines = 3, TextTrimming = TextTrimming.CharacterEllipsis };
-            }
+            card.Content = CreateGameTile(_games[index], image);
         }
         PaintAccent();
         if (fetch) ScheduleArtwork(item);
@@ -245,7 +278,7 @@ public sealed partial class HomeWindow : Window
     private void PaintAccent()
     {
         var brush = new SolidColorBrush(_accent);
-        AccentBar.Background = brush;
+        AccentBar.Background = BrandAccent.Background = brush;
         Play.Background = brush;
         Play.Foreground = new SolidColorBrush(Colors.Black);
         Ambient.Color = Color.FromArgb(99, _accent.R, _accent.G, _accent.B);
@@ -254,16 +287,117 @@ public sealed partial class HomeWindow : Window
             else _tiles[index].ClearValue(Control.BorderBrushProperty);
     }
 
-    private static void Fade(UIElement element, double from, double to)
+    private Image? _frontBackdrop;
+    private int _backdropRequest;
+    private readonly Windows.UI.ViewManagement.UISettings _uiSettings = new();
+
+    private void ShowBackdrop(string? path)
     {
-        if (!new Windows.UI.ViewManagement.UISettings().AnimationsEnabled) { element.Opacity = to; return; }
-        var animation = new DoubleAnimation { From = from, To = to, Duration = new Duration(TimeSpan.FromMilliseconds(260)),
-            EnableDependentAnimation = true };
-        Storyboard.SetTarget(animation, element);
-        Storyboard.SetTargetProperty(animation, "Opacity");
-        var storyboard = new Storyboard();
-        storyboard.Children.Add(animation);
-        storyboard.Begin();
+        if (_backgroundPath == path) return;
+        _backgroundPath = path;
+        var request = ++_backdropRequest;
+        var old = _frontBackdrop;
+        if (path is null)
+        {
+            if (old is not null) AnimateOpacity(old, 0, 420);
+            return;
+        }
+
+        var layer = old == BackdropA ? BackdropB : BackdropA;
+        layer.Source = null;
+        ElementCompositionPreview.GetElementVisual(layer).Opacity = 0;
+        var bitmap = LoadImage(path, 1920);
+        if (bitmap is null) return;
+        void Arrived()
+        {
+            if (_backdropRequest != request || _closed) return;
+            _frontBackdrop = layer;
+            AnimateOpacity(layer, .94f, 520);
+            if (old is not null) AnimateOpacity(old, 0, 520);
+        }
+        bitmap.ImageOpened += (_, _) => Arrived();
+        bitmap.ImageFailed += (_, _) =>
+        {
+            if (_backdropRequest == request && old is not null) AnimateOpacity(old, 0, 320);
+        };
+        layer.Source = bitmap;
+        if (bitmap.PixelWidth != 0) Arrived();
+    }
+
+    private void AnimateHero()
+    {
+        if (!_uiSettings.AnimationsEnabled) return;
+        var visual = ElementCompositionPreview.GetElementVisual(Hero);
+        ElementCompositionPreview.SetIsTranslationEnabled(Hero, true);
+        var transition = visual.Compositor.CreateVector3KeyFrameAnimation();
+        transition.InsertKeyFrame(0, new Vector3(0, 13, 0));
+        transition.InsertKeyFrame(1, Vector3.Zero,
+            visual.Compositor.CreateCubicBezierEasingFunction(new Vector2(.18f, .8f), new Vector2(.29f, 1)));
+        transition.Duration = TimeSpan.FromMilliseconds(310);
+        visual.StartAnimation("Translation", transition);
+        visual.Opacity = .67f;
+        AnimateOpacity(Hero, 1, 320);
+    }
+
+    private void AnimateOpacity(UIElement element, float target, int milliseconds)
+    {
+        var visual = ElementCompositionPreview.GetElementVisual(element);
+        if (!_uiSettings.AnimationsEnabled)
+        {
+            visual.StopAnimation("Opacity");
+            element.Opacity = target;
+            visual.Opacity = target;
+            return;
+        }
+        var animation = visual.Compositor.CreateScalarKeyFrameAnimation();
+        animation.InsertKeyFrame(1, target);
+        animation.Duration = TimeSpan.FromMilliseconds(milliseconds);
+        visual.StartAnimation("Opacity", animation);
+    }
+
+    private void AddInteractionMotion(Button button, double maximumScale = 1.04)
+    {
+        bool pointer = false;
+        bool focus = false;
+        button.PointerEntered += (_, _) => { pointer = true; Update(); };
+        button.PointerExited += (_, _) => { pointer = false; Update(); };
+        button.PointerCanceled += (_, _) => { pointer = false; Update(); };
+        button.GotFocus += (_, _) => { focus = true; Update(); };
+        button.LostFocus += (_, _) => { focus = false; Update(); };
+
+        void Update()
+        {
+            var visual = ElementCompositionPreview.GetElementVisual(button);
+            visual.CenterPoint = new Vector3((float)button.ActualWidth / 2, (float)button.ActualHeight / 2, 0);
+            var scale = _uiSettings.AnimationsEnabled && (pointer || focus) ? (float)maximumScale : 1;
+            var animation = visual.Compositor.CreateVector3KeyFrameAnimation();
+            animation.InsertKeyFrame(1, new Vector3(scale, scale, 1),
+                visual.Compositor.CreateCubicBezierEasingFunction(new Vector2(.19f, .75f), new Vector2(.33f, 1)));
+            animation.Duration = TimeSpan.FromMilliseconds(180);
+            visual.StartAnimation("Scale", animation);
+        }
+    }
+
+    private static Grid CreateGameTile(Game game, BitmapImage? image)
+    {
+        var layout = new Grid { CornerRadius = new CornerRadius(10) };
+        if (image is not null)
+            layout.Background = new ImageBrush { ImageSource = image, Stretch = Stretch.UniformToFill };
+        else
+        {
+            var gradient = new LinearGradientBrush { StartPoint = new Windows.Foundation.Point(0, 1), EndPoint = new Windows.Foundation.Point(1, 0) };
+            gradient.GradientStops.Add(new GradientStop { Color = Color.FromArgb(255, 18, 25, 43), Offset = 0 });
+            gradient.GradientStops.Add(new GradientStop { Color = Color.FromArgb(255, 47, 67, 105), Offset = 1 });
+            layout.Background = gradient;
+            layout.Children.Add(new FontIcon { Glyph = "\uE7FC", FontSize = 24, HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(11, 10, 0, 0) });
+        }
+        var caption = new Border { VerticalAlignment = VerticalAlignment.Bottom, Padding = new Thickness(10, 5, 8, 7),
+            Background = new SolidColorBrush(Color.FromArgb(image is null ? (byte)105 : (byte)201, 8, 12, 22)),
+            Child = new TextBlock { Text = game.Title, FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Colors.White), MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis } };
+        layout.Children.Add(caption);
+        return layout;
     }
 
     private static BitmapImage? LoadImage(string? path, int width)

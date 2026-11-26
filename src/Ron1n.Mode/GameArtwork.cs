@@ -91,6 +91,7 @@ internal static class GameCatalog
         {
             var wikiCover = match.Thumbnail;
             var summary = match.Description;
+            Uri? publisherBackground = null;
             if (!string.IsNullOrWhiteSpace(match.Article))
             {
                 try
@@ -99,11 +100,12 @@ internal static class GameCatalog
                     var html = await Client.GetStringAsync($"https://en.wikipedia.org/w/rest.php/v1/page/{article}/html", cancellationToken);
                     wikiCover ??= FindInfoboxCover(html);
                     summary = ReadLeadSentence(html) ?? summary;
+                    publisherBackground = await FindPublisherBackgroundAsync(html, cancellationToken);
                 }
                 catch (HttpRequestException) { }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
             }
-            return new GameArtwork(summary, wikiCover, null);
+            return new GameArtwork(summary, wikiCover, publisherBackground);
         }
         const string language = "italian";
         var id = match.SteamId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -148,6 +150,48 @@ internal static class GameCatalog
         return path;
     }
 
+    private static async Task<Uri?> FindPublisherBackgroundAsync(string article, CancellationToken token)
+    {
+        var timeout = TimeSpan.FromSeconds(1);
+        var candidates = Regex.Matches(article, """href="(https://[^"<>]+)""",
+                RegexOptions.IgnoreCase, timeout)
+            .Select(match => Uri.TryCreate(WebUtility.HtmlDecode(match.Groups[1].Value), UriKind.Absolute, out var uri) ? uri : null)
+            .OfType<Uri>().Where(IsPublisherPage).Distinct()
+            .OrderByDescending(uri => uri.Host.EndsWith(".pokemon.com", StringComparison.OrdinalIgnoreCase))
+            .Take(3);
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                using var response = await Client.GetAsync(candidate, token);
+                if (!response.IsSuccessStatusCode || response.RequestMessage?.RequestUri is not { } final || !IsPublisherPage(final)) continue;
+                var html = await response.Content.ReadAsStringAsync(token);
+                foreach (Match meta in Regex.Matches(html, @"<meta\b[^>]+>", RegexOptions.IgnoreCase, timeout))
+                {
+                    if (!meta.Value.Contains("og:image", StringComparison.OrdinalIgnoreCase)) continue;
+                    var image = Regex.Match(meta.Value, """\bcontent\s*=\s*["']([^"']+)["']""", RegexOptions.IgnoreCase, timeout);
+                    if (!image.Success) continue;
+                    var value = WebUtility.HtmlDecode(image.Groups[1].Value);
+                    // Some publisher pages generate metadata with their local development origin.
+                    if (Uri.TryCreate(value, UriKind.Absolute, out var absolute) && absolute.IsLoopback)
+                        value = absolute.PathAndQuery;
+                    if (Uri.TryCreate(final, value, out var resolved) && AllowedImage(resolved.AbsoluteUri) is { } result)
+                        return result;
+                }
+            }
+            catch (HttpRequestException) { }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
+        }
+        return null;
+    }
+
+    private static bool IsPublisherPage(Uri uri) => uri.Scheme == "https" &&
+        (uri.Host.EndsWith(".pokemon.com", StringComparison.OrdinalIgnoreCase)
+         && uri.Host is not ("www.pokemon.com" or "support.pokemon.com")
+         || uri.Host.Equals("www.nintendo.com", StringComparison.OrdinalIgnoreCase)
+         && (uri.AbsolutePath.Contains("/store/products/", StringComparison.OrdinalIgnoreCase)
+             || uri.AbsolutePath.Contains("/Games/", StringComparison.OrdinalIgnoreCase)));
+
     private static string? ReadLeadSentence(string html)
     {
         var timeout = TimeSpan.FromSeconds(1);
@@ -191,6 +235,9 @@ internal static class GameCatalog
         && (uri.Host.EndsWith(".steamstatic.com", StringComparison.OrdinalIgnoreCase)
             || uri.Host.Equals("steamcdn-a.akamaihd.net", StringComparison.OrdinalIgnoreCase)
             || uri.Host.Equals("upload.wikimedia.org", StringComparison.OrdinalIgnoreCase)
-            || uri.Host.Equals("thumb.wikimedia.org", StringComparison.OrdinalIgnoreCase))
+            || uri.Host.Equals("thumb.wikimedia.org", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".pokemon.com", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".nintendo.net", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".nintendo.com", StringComparison.OrdinalIgnoreCase))
             ? uri : null;
 }
