@@ -6,7 +6,7 @@ $project = Join-Path $root 'src/Ron1n.Mode/Ron1n.Mode.csproj'
 $setupDir = Join-Path $dist 'installer-publish'
 $portableDir = Join-Path $dist 'portable-publish'
 New-Item -ItemType Directory -Force $dist | Out-Null
-$shared = @($project, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', "-p:Version=$Version", '-p:DebugType=none')
+$shared = @($project, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', "-p:Version=$Version", '-p:DebugType=none', '-p:Platform=x64')
 dotnet publish @shared -o $setupDir
 if ($LASTEXITCODE -ne 0) { throw 'Installer publish failed' }
 dotnet publish @shared -p:PublishSingleFile=true -p:IncludeAllContentForSelfExtract=true -o $portableDir
