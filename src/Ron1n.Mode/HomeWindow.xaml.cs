@@ -25,7 +25,7 @@ public sealed partial class HomeWindow : Window
     private readonly List<Button> _tiles = [];
     private List<Game> _games = [];
     private int _selected = -1;
-    private bool _scanActive, _dialog, _initialized, _closed;
+    private bool _scanActive, _dialog, _initialized, _closed, _shown;
     private GameSession? _session;
     private CancellationTokenSource? _artwork;
     private readonly HashSet<string> _fetched = [];
@@ -72,11 +72,23 @@ public sealed partial class HomeWindow : Window
     public void ShowHome()
     {
         if (_closed || _dialog) return;
-        PlaceHome();
-        AppWindow.Show();
+        var firstShow = !_shown;
+        if (!firstShow) AppWindow.Show();
         Activate();
-        Native.BringForward(_handle);
-        if (Settings.Visibility == Visibility.Collapsed) FocusSelection();
+        _shown = true;
+        if (firstShow) StartupLog.Write("Home window activated.");
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_closed) return;
+            try { PlaceHome(); }
+            catch (Exception ex)
+            {
+                StartupLog.Write($"Fullscreen: {ex}");
+                Report("Impossibile attivare lo schermo intero.");
+            }
+            Native.BringForward(_handle);
+            if (Root.XamlRoot is not null && Settings.Visibility == Visibility.Collapsed) FocusSelection();
+        });
     }
 
     private void PlaceHome()
@@ -332,7 +344,7 @@ public sealed partial class HomeWindow : Window
             var status = _controller.Connected ? "Controller" : "Mouse e tastiera";
             if (InputStatus.Text != status) InputStatus.Text = status;
             if (shortcut && !_dialog) { ShowHome(); return; }
-            if (Native.GetForegroundWindow() != _handle) return;
+            if (Native.GetForegroundWindow() != _handle || Root.XamlRoot is null) return;
             if ((buttons & Controller.Down) != 0) FocusManager.TryMoveFocus(FocusNavigationDirection.Down);
             if ((buttons & Controller.Up) != 0) FocusManager.TryMoveFocus(FocusNavigationDirection.Up);
             if ((buttons & Controller.Left) != 0) FocusManager.TryMoveFocus(FocusNavigationDirection.Left);

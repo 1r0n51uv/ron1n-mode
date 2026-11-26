@@ -7,7 +7,7 @@ on:
       version:
         description: Version, without v
         required: true
-        default: '0.1.0'
+        default: '0.1.1'
       publish:
         description: Publish on GitHub Releases
         type: boolean
@@ -47,6 +47,9 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.value }}
         run: ./build/Publish-Ron1nMode.ps1 -Version $env:VERSION
+      - name: Verify installed app opens on Windows
+        shell: pwsh
+        run: ./build/Smoke-InstalledStartup.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: Ron1n-Mode-${{ steps.version.outputs.value }}

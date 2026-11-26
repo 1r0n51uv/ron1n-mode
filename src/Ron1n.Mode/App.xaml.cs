@@ -9,7 +9,12 @@ public partial class App : Application
     private RegisteredWaitHandle? _wait;
     private HomeWindow? _window;
 
-    public App() => InitializeComponent();
+    public App()
+    {
+        StartupLog.Write("Initializing WinUI.");
+        UnhandledException += (_, args) => StartupLog.Write(args.Exception.ToString());
+        InitializeComponent();
+    }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -24,6 +29,7 @@ public partial class App : Application
         }
 
         _show = new EventWaitHandle(false, EventResetMode.AutoReset, showEvent);
+        StartupLog.Write("Creating the home window.");
         var window = _window = new HomeWindow();
         window.Closed += (_, _) =>
         {
