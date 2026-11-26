@@ -5,18 +5,73 @@ using System.Text.RegularExpressions;
 
 namespace Ron1n.Mode;
 
-internal sealed record ArtworkMatch(uint SteamId, string Title)
+internal sealed record ArtworkMatch(uint? SteamId, string Title, string? Article = null, string Description = "", Uri? Thumbnail = null)
 {
-    public override string ToString() => Title;
+    public string Label => $"{Title} · {(SteamId.HasValue ? "Steam" : "Wikipedia")}";
+    public string Id => SteamId.HasValue ? $"steam:{SteamId}" : $"wikipedia:{Article}";
+    public override string ToString() => Label;
 }
 
 internal sealed record GameArtwork(string Description, Uri? Cover, Uri? Background);
 
-internal static class SteamStoreArtwork
+internal static class GameCatalog
 {
-    private static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(8) };
+    private static readonly HttpClient Client = CreateClient();
 
-    public static async Task<List<ArtworkMatch>> SearchAsync(string name, CancellationToken cancellationToken = default)
+    private static HttpClient CreateClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(7) };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("RON1N-Mode/0.1 (+https://github.com/1r0n51uv/ron1n-mode)");
+        return client;
+    }
+
+    public static async Task<List<ArtworkMatch>> SearchAsync(string name, CancellationToken token = default)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return [];
+        var steam = TrySearch(() => SearchSteam(name, token), token);
+        var wiki = TrySearch(() => SearchWikipedia(name, token), token);
+        await Task.WhenAll(steam, wiki);
+        if (steam.Result is null && wiki.Result is null)
+            throw new HttpRequestException("I cataloghi sono temporaneamente irraggiungibili.");
+        return (steam.Result ?? []).Concat(wiki.Result ?? [])
+            .OrderByDescending(match => Normalize(match.Title) == Normalize(name))
+            .ToList();
+    }
+
+    private static async Task<List<ArtworkMatch>?> TrySearch(Func<Task<List<ArtworkMatch>>> search, CancellationToken token)
+    {
+        try { return await search(); }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
+        {
+            token.ThrowIfCancellationRequested();
+            return null;
+        }
+    }
+
+    internal static string Normalize(string input) => string.Concat(input.Normalize(System.Text.NormalizationForm.FormD)
+        .Where(char.IsLetterOrDigit)).ToUpperInvariant();
+
+    private static async Task<List<ArtworkMatch>> SearchWikipedia(string name, CancellationToken token)
+    {
+        var url = $"https://en.wikipedia.org/w/rest.php/v1/search/page?q={Uri.EscapeDataString(name)}&limit=10";
+        using var document = JsonDocument.Parse(await Client.GetStringAsync(url, token));
+        var results = new List<ArtworkMatch>();
+        foreach (var page in document.RootElement.GetProperty("pages").EnumerateArray())
+        {
+            var description = Read(page, "description");
+            if (!description.Contains("video game", StringComparison.OrdinalIgnoreCase)
+                || description.Contains("video game series", StringComparison.OrdinalIgnoreCase)
+                || description.Contains("video game character", StringComparison.OrdinalIgnoreCase)
+                || description.Contains("video game awards show", StringComparison.OrdinalIgnoreCase)) continue;
+            var thumbnail = page.TryGetProperty("thumbnail", out var thumb) && thumb.ValueKind == JsonValueKind.Object
+                ? Read(thumb, "url") : "";
+            var image = AllowedImage(thumbnail.StartsWith("//", StringComparison.Ordinal) ? "https:" + thumbnail : thumbnail);
+            results.Add(new ArtworkMatch(null, Read(page, "title"), Read(page, "key"), description, image));
+        }
+        return results;
+    }
+
+    private static async Task<List<ArtworkMatch>> SearchSteam(string name, CancellationToken cancellationToken)
     {
         var url = $"https://store.steampowered.com/api/storesearch/?term={Uri.EscapeDataString(name)}&l=english&cc=US";
         using var data = JsonDocument.Parse(await Client.GetStringAsync(url, cancellationToken));
@@ -32,20 +87,35 @@ internal static class SteamStoreArtwork
 
     public static async Task<GameArtwork?> GetAsync(ArtworkMatch match, CancellationToken cancellationToken = default)
     {
+        if (match.SteamId is null)
+        {
+            var wikiCover = match.Thumbnail;
+            var summary = match.Description;
+            if (!string.IsNullOrWhiteSpace(match.Article))
+            {
+                try
+                {
+                    var article = Uri.EscapeDataString(match.Article);
+                    var html = await Client.GetStringAsync($"https://en.wikipedia.org/w/rest.php/v1/page/{article}/html", cancellationToken);
+                    wikiCover ??= FindInfoboxCover(html);
+                    summary = ReadLeadSentence(html) ?? summary;
+                }
+                catch (HttpRequestException) { }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+            }
+            return new GameArtwork(summary, wikiCover, null);
+        }
         const string language = "italian";
-        var id = match.SteamId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var id = match.SteamId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         using var payload = JsonDocument.Parse(await Client.GetStringAsync(
             $"https://store.steampowered.com/api/appdetails?appids={id}&l={language}", cancellationToken));
         if (!payload.RootElement.TryGetProperty(id, out var response)
             || !response.TryGetProperty("data", out var data)) return null;
-        string Read(JsonElement element, string property) =>
-            element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
-                ? value.GetString() ?? "" : "";
         var description = WebUtility.HtmlDecode(Regex.Replace(Read(data, "short_description"), "<[^>]+>", ""));
-        var cover = SteamImage(Read(data, "capsule_imagev5")) ?? SteamImage(Read(data, "header_image"));
-        var background = SteamImage(Read(data, "background_raw"));
+        var cover = AllowedImage(Read(data, "capsule_imagev5")) ?? AllowedImage(Read(data, "header_image"));
+        var background = AllowedImage(Read(data, "background_raw"));
         if (background is null && data.TryGetProperty("screenshots", out var shots) && shots.GetArrayLength() > 0)
-            background = SteamImage(Read(shots[0], "path_full"));
+            background = AllowedImage(Read(shots[0], "path_full"));
         return new GameArtwork(description, cover, background);
     }
 
@@ -57,10 +127,11 @@ internal static class SteamStoreArtwork
         {
             "image/jpeg" => ".jpg",
             "image/png" => ".png",
+            "image/webp" => ".webp",
             _ => null
         };
         if (!response.IsSuccessStatusCode || extension is null || response.RequestMessage?.RequestUri is not { } final
-            || SteamImage(final.AbsoluteUri) is null) return null;
+            || AllowedImage(final.AbsoluteUri) is null) return null;
         const int maximumBytes = 10 * 1024 * 1024;
         if (response.Content.Headers.ContentLength > maximumBytes) return null;
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -77,9 +148,49 @@ internal static class SteamStoreArtwork
         return path;
     }
 
-    private static Uri? SteamImage(string value) =>
+    private static string? ReadLeadSentence(string html)
+    {
+        var timeout = TimeSpan.FromSeconds(1);
+        foreach (Match paragraph in Regex.Matches(html, @"<p\b[^>]*>(.*?)</p>", RegexOptions.Singleline, timeout))
+        {
+            var withoutNotes = Regex.Replace(paragraph.Groups[1].Value, @"<sup\b[^>]*>.*?</sup>", "", RegexOptions.Singleline, timeout);
+            var plain = WebUtility.HtmlDecode(Regex.Replace(withoutNotes, "<[^>]+>", "", RegexOptions.None, timeout));
+            plain = Regex.Replace(plain, @"\s+", " ", RegexOptions.None, timeout).Trim();
+            if (plain.Length < 60) continue;
+            var sentence = plain.IndexOf(". ", StringComparison.Ordinal);
+            if (sentence > 0 && sentence < 250) return plain[..(sentence + 1)];
+            if (plain.Length <= 250) return plain;
+            var breakAt = plain.LastIndexOf(' ', 250);
+            return plain[..(breakAt > 0 ? breakAt : 250)].TrimEnd() + "…";
+        }
+        return null;
+    }
+
+    private static Uri? FindInfoboxCover(string html)
+    {
+        var table = Regex.Match(html, """<table\b[^>]*\bclass="[^"]*\binfobox\b[^"]*"[^>]*>(.*?)</table>""",
+            RegexOptions.Singleline | RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+        if (!table.Success) return null;
+        foreach (Match image in Regex.Matches(table.Groups[1].Value, """<img\b[^>]*\bsrc="([^"]+)""",
+            RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1)))
+        {
+            var url = WebUtility.HtmlDecode(image.Groups[1].Value);
+            if (url.Contains(".svg", StringComparison.OrdinalIgnoreCase)) continue;
+            if (AllowedImage(url.StartsWith("//", StringComparison.Ordinal) ? "https:" + url : url) is { } cover)
+                return cover;
+        }
+        return null;
+    }
+
+    private static string Read(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? "" : "";
+
+    private static Uri? AllowedImage(string value) =>
         Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == "https"
         && (uri.Host.EndsWith(".steamstatic.com", StringComparison.OrdinalIgnoreCase)
-            || uri.Host.Equals("steamcdn-a.akamaihd.net", StringComparison.OrdinalIgnoreCase))
+            || uri.Host.Equals("steamcdn-a.akamaihd.net", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.Equals("upload.wikimedia.org", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.Equals("thumb.wikimedia.org", StringComparison.OrdinalIgnoreCase))
             ? uri : null;
 }

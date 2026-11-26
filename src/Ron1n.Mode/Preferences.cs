@@ -25,6 +25,7 @@ internal sealed class Presentation
     public string Card { get; set; } = "";
     public string Background { get; set; } = "";
     public uint? ArtworkId { get; set; }
+    public string CatalogId { get; set; } = "";
 }
 
 internal sealed class Preferences

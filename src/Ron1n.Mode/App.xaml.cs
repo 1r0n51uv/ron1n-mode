@@ -1,5 +1,4 @@
-using System.Windows;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
 
 namespace Ron1n.Mode;
 
@@ -8,32 +7,32 @@ public partial class App : Application
     private Mutex? _instance;
     private EventWaitHandle? _show;
     private RegisteredWaitHandle? _wait;
+    private HomeWindow? _window;
 
-    protected override void OnStartup(StartupEventArgs e)
+    public App() => InitializeComponent();
+
+    protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        base.OnStartup(e);
-        _instance = new Mutex(true, @"Local\Ron1nMode", out var first);
+        _instance = new Mutex(false, @"Local\Ron1nMode", out var first);
         const string showEvent = @"Local\Ron1nMode.Show";
         if (!first)
         {
             if (EventWaitHandle.TryOpenExisting(showEvent, out var existing))
                 using (existing) existing.Set();
-            Shutdown();
+            Exit();
             return;
         }
-        _show = new EventWaitHandle(false, EventResetMode.AutoReset, showEvent);
-        var window = new HomeWindow();
-        MainWindow = window;
-        _wait = ThreadPool.RegisterWaitForSingleObject(_show, (_, _) =>
-            Dispatcher.InvokeAsync(window.ShowHome, DispatcherPriority.Normal), null, Timeout.Infinite, false);
-        window.Show();
-    }
 
-    protected override void OnExit(ExitEventArgs e)
-    {
-        _wait?.Unregister(null);
-        _show?.Dispose();
-        _instance?.Dispose();
-        base.OnExit(e);
+        _show = new EventWaitHandle(false, EventResetMode.AutoReset, showEvent);
+        var window = _window = new HomeWindow();
+        window.Closed += (_, _) =>
+        {
+            _wait?.Unregister(null);
+            _show?.Dispose();
+            _instance?.Dispose();
+        };
+        _wait = ThreadPool.RegisterWaitForSingleObject(_show, (_, _) =>
+            window.DispatcherQueue.TryEnqueue(window.ShowHome), null, Timeout.Infinite, false);
+        window.ShowHome();
     }
 }

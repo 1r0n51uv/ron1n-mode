@@ -7,7 +7,7 @@ on:
       version:
         description: Version, without v
         required: true
-        default: '1.7.1.6'
+        default: '0.1.0'
       publish:
         description: Publish on GitHub Releases
         type: boolean
@@ -33,7 +33,7 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.Substring(1) } else { $env:INPUT_VERSION }
-          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?(-(alpha|beta)\.\d+)?$') { throw 'Invalid version' }
+          if ($version -notmatch '^\d+\.\d+\.\d+(-(alpha|beta)\.\d+)?$') { throw 'Invalid version' }
           "value=$version" >> $env:GITHUB_OUTPUT
       - name: Install Inno Setup
         shell: pwsh

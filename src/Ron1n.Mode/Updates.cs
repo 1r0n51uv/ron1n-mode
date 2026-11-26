@@ -5,7 +5,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace Ron1n.Mode;
 
@@ -14,6 +15,8 @@ internal sealed record Update(string Tag, Uri Asset, string Digest);
 internal static class Updates
 {
     public const string Repository = "1r0n51uv/ron1n-mode";
+    // The initial compatibility build used the fork’s version and predates our release line.
+    private const string LegacyCompatibilityTag = "v1.7.1.6";
     private static readonly HttpClient Http = CreateClient();
     public static bool Installed => File.Exists(Path.Combine(Preferences.ExecutableDirectory, "ConsoleMode.installed"));
 
@@ -28,7 +31,7 @@ internal static class Updates
         foreach (var release in releases.RootElement.EnumerateArray())
         {
             var tag = release.GetProperty("tag_name").GetString() ?? "";
-            if (release.GetProperty("draft").GetBoolean() || (release.GetProperty("prerelease").GetBoolean() && !beta && current.Item2 == 2)
+            if (tag == LegacyCompatibilityTag || release.GetProperty("draft").GetBoolean() || (release.GetProperty("prerelease").GetBoolean() && !beta && current.Item2 == 2)
                 || Parse(tag.TrimStart('v')) is not { } version || version.CompareTo(latestVersion) <= 0) continue;
             foreach (var asset in release.GetProperty("assets").EnumerateArray())
             {
@@ -133,25 +136,25 @@ public partial class HomeWindow
             var update = await Updates.Find(_preferences.BetaUpdates);
             if (update is null)
             {
-                if (interactive) Status.Text = "Nessun aggiornamento disponibile.";
+                if (interactive) Report("Nessun aggiornamento disponibile.");
                 return;
             }
-            if (_session is not null || !IsActive)
+            if (_session is not null || Native.GetForegroundWindow() != _handle || _dialog)
             {
-                Status.Text = "Aggiornamento disponibile · " + update.Tag;
+                Report("Aggiornamento disponibile · " + update.Tag);
                 return;
             }
-            if (MessageBox.Show(this, $"Installare {update.Tag} e riavviare RON1N Mode?", "Aggiornamento",
-                    MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-            Status.Text = "Download dell’aggiornamento…";
+            var prompt = CreateDialog("Aggiornamento", $"Installare {update.Tag} e riavviare RON1N Mode?", "Installa");
+            if (!await ShowDialog(prompt)) return;
+            Report("Download dell’aggiornamento…");
             _dialog = true;
-            await Updates.Install(update);
-            Application.Current.Shutdown();
+            try { await Updates.Install(update); Close(); }
+            finally { _dialog = false; }
         }
         catch (Exception ex)
         {
-            if (interactive) Status.Text = "Aggiornamento non riuscito: " + ex.Message;
+            if (interactive) Report("Aggiornamento non riuscito: " + ex.Message);
         }
-        finally { _checking = false; _dialog = false; }
+        finally { _checking = false; }
     }
 }
