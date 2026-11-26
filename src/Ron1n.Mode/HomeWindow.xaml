@@ -1,0 +1,55 @@
+<Window x:Class="Ron1n.Mode.HomeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RON1N Mode" Background="#090D16" Foreground="#F5F7FB"
+        WindowStyle="None" ResizeMode="NoResize" Width="1280" Height="720">
+    <Grid ClipToBounds="True">
+        <Image x:Name="BackdropA" Stretch="UniformToFill" Opacity="0"/>
+        <Image x:Name="BackdropB" Stretch="UniformToFill" Opacity="0"/>
+        <Rectangle>
+            <Rectangle.Fill>
+                <RadialGradientBrush Center=".69,.39" GradientOrigin=".69,.39" RadiusX=".68" RadiusY=".9">
+                    <GradientStop x:Name="Ambient" Color="#9033B7BD" Offset="0"/>
+                    <GradientStop Color="#00090D16" Offset="1"/>
+                </RadialGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+        <Rectangle>
+            <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,.4">
+                    <GradientStop Color="#F0090D16" Offset="0"/>
+                    <GradientStop Color="#A8090D16" Offset=".4"/>
+                    <GradientStop Color="#21090D16" Offset="1"/>
+                </LinearGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+        <Grid Margin="48,35,48,34">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <DockPanel LastChildFill="True">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="15,0,0,0">
+                    <TextBlock x:Name="InputStatus" VerticalAlignment="Center" Margin="8" Foreground="#D0DBED"/>
+                    <Button Click="OpenSettings">Impostazioni</Button>
+                    <Button Click="ShowDesktop">Desktop</Button>
+                </StackPanel>
+                <ScrollViewer x:Name="LibraryScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                    <StackPanel x:Name="Cards" Orientation="Horizontal" MinHeight="108"/>
+                </ScrollViewer>
+            </DockPanel>
+            <StackPanel x:Name="Hero" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Left" MaxWidth="705">
+                <Border x:Name="AccentBar" Height="4" Width="55" CornerRadius="2" HorizontalAlignment="Left" Margin="0,0,0,20"/>
+                <TextBlock x:Name="TitleText" Text="La tua libreria" FontFamily="Segoe UI" FontSize="69" FontWeight="Bold" TextWrapping="Wrap" LineStackingStrategy="BlockLineHeight" LineHeight="76"/>
+                <TextBlock x:Name="Description" Text="Aggiungi un gioco o scegli la cartella da cui importarlo." Foreground="#E1EAF8" FontSize="21" TextWrapping="Wrap" MaxHeight="95" Margin="0,12,0,0"/>
+                <TextBlock x:Name="SessionStatus" Foreground="#D0DBED" Margin="0,8,0,0" FontSize="15"/>
+                <StackPanel Orientation="Horizontal" Margin="0,18,0,0">
+                    <Button x:Name="Play" Click="PlayGame" Content="Aggiungi gioco" Foreground="#0B1020" FontWeight="SemiBold" Padding="26,10"/>
+                    <Button x:Name="More" Click="OpenGameMenu" Content="•••" AutomationProperties.Name="Opzioni del gioco"/>
+                </StackPanel>
+            </StackPanel>
+            <TextBlock x:Name="Status" Grid.Row="2" FontSize="14" Foreground="#D0DBED" TextWrapping="Wrap"/>
+        </Grid>
+    </Grid>
+</Window>

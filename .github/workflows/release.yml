@@ -1,0 +1,78 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version, without v
+        required: true
+        default: '1.7.1.6'
+      publish:
+        description: Publish on GitHub Releases
+        type: boolean
+        default: false
+      draft:
+        description: Create a draft for review
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Version
+        id: version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.Substring(1) } else { $env:INPUT_VERSION }
+          if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?(-(alpha|beta)\.\d+)?$') { throw 'Invalid version' }
+          "value=$version" >> $env:GITHUB_OUTPUT
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed' }
+          }
+      - name: Build setup and portable
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: ./build/Publish-Ron1nMode.ps1 -Version $env:VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ron1n-Mode-${{ steps.version.outputs.value }}
+          path: dist/ConsoleMode-*-x64.exe
+          if-no-files-found: error
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+  publish:
+    needs: build
+    if: github.ref_type == 'tag' || (inputs.publish && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Ron1n-Mode-${{ needs.build.outputs.version }}
+          path: dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          DRAFT: ${{ inputs.draft }}
+        shell: bash
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --generate-notes)
+          if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+          if [[ "$DRAFT" == true ]]; then args+=(--draft); fi
+          gh release create "v$VERSION" dist/ConsoleMode-Setup-x64.exe dist/ConsoleMode-Portable-x64.exe "${args[@]}"
