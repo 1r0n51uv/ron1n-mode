@@ -24,8 +24,14 @@ internal sealed class Presentation
     public string Description { get; set; } = "";
     public string Card { get; set; } = "";
     public string Background { get; set; } = "";
-    public uint? ArtworkId { get; set; }
     public string CatalogId { get; set; } = "";
+    public string CatalogTitle { get; set; } = "";
+    public string CatalogUrl { get; set; } = "";
+    public string[] CatalogDetails { get; set; } = [];
+    [JsonPropertyName("launchBoxMedia")]
+    public bool HasCatalogMedia { get; set; }
+    public double CoverAspect { get; set; }
+    [JsonIgnore] public bool IsLaunchBox => CatalogId.StartsWith("launchbox:", StringComparison.Ordinal);
 }
 
 internal sealed class Preferences
@@ -40,6 +46,7 @@ internal sealed class Preferences
     public string GamesFolder { get; set; } = "";
     public string LastPlayed { get; set; } = "";
     public string Screen { get; set; } = "";
+    public string CardMaterial { get; set; } = "dark";
     public bool CheckUpdates { get; set; } = true;
     public bool BetaUpdates { get; set; }
     public string KeyboardShortcut { get; set; } = "F11";
@@ -65,6 +72,7 @@ internal sealed class Preferences
         preferences.ControllerShortcut = old.MenuShortcut;
         preferences.CheckUpdates = old.CheckUpdates;
         preferences.BetaUpdates = old.BetaUpdates;
+        preferences.CardMaterial = old.CardMaterial ?? "dark";
         foreach (var game in preferences.Manual)
             if (old.LaunchImages.TryGetValue("customApp:" + game.Id, out var art)) preferences.Art[game.Id] = art;
         return preferences;
@@ -106,5 +114,6 @@ internal sealed class Preferences
         public int MenuShortcut { get; set; }
         public bool CheckUpdates { get; set; } = true;
         public bool BetaUpdates { get; set; }
+        public string? CardMaterial { get; set; }
     }
 }

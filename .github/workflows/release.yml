@@ -7,7 +7,7 @@ on:
       version:
         description: Version, without v
         required: true
-        default: '0.1.1'
+        default: '0.2.0'
       publish:
         description: Publish on GitHub Releases
         type: boolean

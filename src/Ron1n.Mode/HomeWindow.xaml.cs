@@ -24,6 +24,7 @@ public sealed partial class HomeWindow : Window
     private readonly DispatcherQueueTimer _input;
     private readonly DispatcherQueueTimer _sessionTimer;
     private readonly List<Button> _tiles = [];
+    private Button? _addGameButton;
     private List<Game> _games = [];
     private int _selected = -1;
     private bool _scanActive, _dialog, _initialized, _closed, _shown;
@@ -50,11 +51,12 @@ public sealed partial class HomeWindow : Window
         _sessionTimer.Interval = TimeSpan.FromMilliseconds(750);
         _sessionTimer.Tick += (_, _) => PollSession();
         Root.KeyDown += OnKey;
-        foreach (var action in new[] { Play, More, SettingsAction, DesktopAction, SettingsBack }) AddInteractionMotion(action);
+        foreach (var action in new[] { More, SettingsAction, DesktopAction, SettingsBack }) AddInteractionMotion(action);
         Root.SizeChanged += (_, args) =>
         {
             Home.Padding = new Thickness(args.NewSize.Width < 900 ? 26 : 46, 24, args.NewSize.Width < 900 ? 26 : 46, 18);
             TitleText.FontSize = Math.Clamp(args.NewSize.Height * .105, 36, 72);
+            SettingsRail.Width = new GridLength(args.NewSize.Width < 980 ? 216 : 286);
         };
         Root.Loaded += async (_, _) =>
         {
@@ -101,8 +103,9 @@ public sealed partial class HomeWindow : Window
 
     private void PlaceHome()
     {
-        var area = DisplayArea.FindAll().FirstOrDefault(display => display.DisplayId.Value.ToString() == _preferences.Screen)
-                   ?? DisplayArea.Primary;
+        var area = _preferences.Screen.Length == 0 ? DisplayArea.Primary
+            : FindDisplayAreas().FirstOrDefault(display => display.DisplayId.Value.ToString() == _preferences.Screen)
+                ?? DisplayArea.Primary;
         if (area is null) return;
         if (AppWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen &&
             DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary)?.DisplayId.Value == area.DisplayId.Value)
@@ -111,6 +114,25 @@ public sealed partial class HomeWindow : Window
         var bounds = area.WorkArea;
         AppWindow.MoveAndResize(new RectInt32(bounds.X, bounds.Y, Math.Max(1, bounds.Width / 2), Math.Max(1, bounds.Height / 2)));
         AppWindow.SetPresenter(AppWindowPresenterKind.FullScreen);
+    }
+
+    private static List<DisplayArea> FindDisplayAreas()
+    {
+        var displays = new List<DisplayArea>();
+        try
+        {
+            var areas = DisplayArea.FindAll();
+            // Index the WinRT vector directly. Its IEnumerable projection can fail on desktop.
+            for (var index = 0; index < areas.Count; index++)
+                displays.Add(areas[index]);
+        }
+        catch (Exception ex) when (ex is InvalidCastException or System.Runtime.InteropServices.COMException)
+        {
+            StartupLog.Write($"Display enumeration: {ex}");
+        }
+        if (displays.Count == 0 && DisplayArea.Primary is { } primary)
+            displays.Add(primary);
+        return displays;
     }
 
     private async Task ReloadGames(string? select = null)
@@ -146,10 +168,8 @@ public sealed partial class HomeWindow : Window
         _tiles.Clear();
         for (var index = 0; index < _games.Count; index++)
         {
-            var game = _games[index];
             var position = index;
-            var tile = new Button { Width = 160, Height = 104, CornerRadius = new CornerRadius(12), Padding = new Thickness(0),
-                HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+            var tile = new Button { Style = ConsoleStyle("LaunchTileButton") };
             AddInteractionMotion(tile, 1.065);
             tile.PointerEntered += (_, args) =>
             {
@@ -157,17 +177,20 @@ public sealed partial class HomeWindow : Window
                 ScheduleHoverPreview(position);
             };
             tile.PointerExited += (_, _) => CancelHoverPreview(position);
-            AutomationProperties.SetName(tile, game.Title);
-            ToolTipService.SetToolTip(tile, game.Title);
-            tile.Click += (_, _) => { if (_selected == position) StartOrResume(); else Select(position); };
+            tile.Click += (_, _) =>
+            {
+                CancelHoverPreview(_hoverIndex);
+                Select(position);
+                StartOrResume();
+            };
             tile.GotFocus += (_, _) => Select(position);
             _tiles.Add(tile);
             Cards.Children.Add(tile);
         }
-        var add = new Button
+        var add = _addGameButton = new Button
         {
             Content = new FontIcon { Glyph = "\uE710", FontSize = 20 },
-            Width = 59, Height = 59, VerticalAlignment = VerticalAlignment.Center
+            Style = ConsoleStyle("ConsoleNavButton"), VerticalAlignment = VerticalAlignment.Center
         };
         AddInteractionMotion(add);
         AutomationProperties.SetName(add, "Aggiungi un gioco");
@@ -213,7 +236,7 @@ public sealed partial class HomeWindow : Window
             _tiles[_selected].Focus(FocusState.Programmatic);
             _tiles[_selected].StartBringIntoView();
         }
-        else Play.Focus(FocusState.Programmatic);
+        else _addGameButton?.Focus(FocusState.Programmatic);
     }
 
     private string? _backgroundPath;
@@ -224,38 +247,38 @@ public sealed partial class HomeWindow : Window
     {
         var item = SelectedGame;
         var art = item is null ? null : _preferences.For(item);
-        TitleText.Text = item?.Title ?? "La tua libreria";
-        Description.Text = art?.Description ?? "Aggiungi un gioco o scegli la cartella da cui importarlo.";
+        TitleText.Text = item is null ? "La tua libreria" : DisplayTitle(item, art);
+        var hasCatalog = art?.IsLaunchBox == true;
+        var hasMedia = hasCatalog && art!.HasCatalogMedia;
+        GameDetails.Text = hasCatalog ? string.Join(" · ", art!.CatalogDetails) : "";
+        GameDetails.Visibility = GameDetails.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        Description.Text = hasCatalog ? art!.Description
+            : item is null ? "Aggiungi un gioco o scegli la cartella da cui importarlo." : "";
         Description.Visibility = Description.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        var catalogId = art?.CatalogId ?? "";
-        var wikiArticle = catalogId.StartsWith("wikipedia:", StringComparison.Ordinal) ? catalogId["wikipedia:".Length..] : "";
-        CatalogSource.Visibility = wikiArticle.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
-        if (wikiArticle.Length > 0)
-        {
-            CatalogSource.Content = "Fonte: Wikipedia";
-            CatalogSource.NavigateUri = new Uri("https://en.wikipedia.org/wiki/" + Uri.EscapeDataString(wikiArticle));
-        }
         More.Visibility = item is null ? Visibility.Collapsed : Visibility.Visible;
         var running = item is not null && _session?.Game.Id == item.Id;
-        PlayLabel.Text = item is null ? "Aggiungi gioco" : running ? "Riprendi" : "Gioca";
-        PlayIcon.Glyph = item is null ? "\uE710" : "\uE768";
-        AutomationProperties.SetName(Play, PlayLabel.Text);
         SessionStatus.Text = running ? "In esecuzione" : _session is null ? "" : _session.Game.Title + " · In esecuzione";
         SessionStatus.Visibility = SessionStatus.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        var background = File.Exists(art?.Background) ? art!.Background : null;
+        var background = hasMedia && File.Exists(art!.Background) ? art.Background : null;
         ShowBackdrop(background);
         if (animate) AnimateHero();
-        _ = UpdatePaletteAsync(background ?? art?.Card, item?.Id);
+        _ = UpdatePaletteAsync(background ?? (hasMedia ? art?.Card : null), item?.Id);
         for (var index = 0; index < _tiles.Count; index++)
         {
             var card = _tiles[index];
-            card.BorderThickness = new Thickness(index == _selected ? 2 : 1);
-            card.Opacity = index == _selected ? 1 : .76;
-            var path = Math.Abs(index - _selected) <= 12 ? _preferences.For(_games[index]).Card : "";
-            if (card.Content is not null && card.Tag as string == path) continue;
-            card.Tag = path;
-            var image = LoadImage(path, 260);
-            card.Content = CreateGameTile(_games[index], image);
+            card.BorderThickness = new Thickness(index == _selected ? 2 : 0);
+            card.Opacity = index == _selected ? 1 : .84;
+            var game = _games[index];
+            var presentation = _preferences.For(game);
+            var title = DisplayTitle(game, presentation);
+            var hasCover = presentation.IsLaunchBox && presentation.HasCatalogMedia && File.Exists(presentation.Card);
+            card.Width = hasCover && presentation.CoverAspect > 0 ? Math.Clamp(card.Height * presentation.CoverAspect, 108, 270) : 144;
+            var path = hasCover && Math.Abs(index - _selected) <= 12 ? presentation.Card : "";
+            if (card.Tag is ValueTuple<string, string> previous && previous == (title, path)) continue;
+            card.Tag = (title, path);
+            AutomationProperties.SetName(card, title);
+            var image = LoadImage(path, 352);
+            card.Content = CreateGameTile(image);
         }
         PaintAccent();
         if (fetch) ScheduleArtwork(item);
@@ -279,12 +302,29 @@ public sealed partial class HomeWindow : Window
     {
         var brush = new SolidColorBrush(_accent);
         AccentBar.Background = BrandAccent.Background = brush;
-        Play.Background = brush;
-        Play.Foreground = new SolidColorBrush(Colors.Black);
         Ambient.Color = Color.FromArgb(99, _accent.R, _accent.G, _accent.B);
+        ApplyGlassMaterial();
         for (var index = 0; index < _tiles.Count; index++)
             if (index == _selected) _tiles[index].BorderBrush = brush;
             else _tiles[index].ClearValue(Control.BorderBrushProperty);
+    }
+
+    private void ApplyGlassMaterial()
+    {
+        var glass = (AcrylicBrush)Application.Current.Resources["GlassFill"];
+        var (tint, opacity, luminosity, mix) = _preferences.CardMaterial switch
+        {
+            "light" => (Colors.White, .26, .45, .25),
+            "clear" => (Colors.Black, .10, .20, .35),
+            "accent" => (_accent, .42, .55, 1.0),
+            _ => (Color.FromArgb(255, 13, 20, 29), .42, .60, .30)
+        };
+        glass.TintColor = Color.FromArgb(255, Blend(tint.R, _accent.R, mix),
+            Blend(tint.G, _accent.G, mix), Blend(tint.B, _accent.B, mix));
+        glass.TintOpacity = opacity;
+        glass.TintLuminosityOpacity = luminosity;
+
+        static byte Blend(byte value, byte accent, double mix) => (byte)Math.Round(value + (accent - value) * mix);
     }
 
     private Image? _frontBackdrop;
@@ -378,25 +418,23 @@ public sealed partial class HomeWindow : Window
         }
     }
 
-    private static Grid CreateGameTile(Game game, BitmapImage? image)
+    private static string DisplayTitle(Game game, Presentation? art) =>
+        art?.IsLaunchBox == true && !string.IsNullOrWhiteSpace(art.CatalogTitle) ? art.CatalogTitle : game.Title;
+
+    private static Grid CreateGameTile(BitmapImage? image)
     {
-        var layout = new Grid { CornerRadius = new CornerRadius(10) };
+        var layout = new Grid { CornerRadius = new CornerRadius(20) };
         if (image is not null)
-            layout.Background = new ImageBrush { ImageSource = image, Stretch = Stretch.UniformToFill };
+            layout.Background = new ImageBrush { ImageSource = image, Stretch = Stretch.Uniform };
         else
         {
             var gradient = new LinearGradientBrush { StartPoint = new Windows.Foundation.Point(0, 1), EndPoint = new Windows.Foundation.Point(1, 0) };
-            gradient.GradientStops.Add(new GradientStop { Color = Color.FromArgb(255, 18, 25, 43), Offset = 0 });
-            gradient.GradientStops.Add(new GradientStop { Color = Color.FromArgb(255, 47, 67, 105), Offset = 1 });
+            gradient.GradientStops.Add(new GradientStop { Color = Color.FromArgb(105, 18, 25, 43), Offset = 0 });
+            gradient.GradientStops.Add(new GradientStop { Color = Color.FromArgb(65, 47, 67, 105), Offset = 1 });
             layout.Background = gradient;
-            layout.Children.Add(new FontIcon { Glyph = "\uE7FC", FontSize = 24, HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(11, 10, 0, 0) });
+            layout.Children.Add(new FontIcon { Glyph = "\uE7FC", FontSize = 30, HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center });
         }
-        var caption = new Border { VerticalAlignment = VerticalAlignment.Bottom, Padding = new Thickness(10, 5, 8, 7),
-            Background = new SolidColorBrush(Color.FromArgb(image is null ? (byte)105 : (byte)201, 8, 12, 22)),
-            Child = new TextBlock { Text = game.Title, FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(Colors.White), MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis } };
-        layout.Children.Add(caption);
         return layout;
     }
 
@@ -404,12 +442,6 @@ public sealed partial class HomeWindow : Window
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
         return new BitmapImage(new Uri(path)) { DecodePixelWidth = width };
-    }
-
-    private async void PlayGame(object sender, RoutedEventArgs e)
-    {
-        if (SelectedGame is null) await AddManual();
-        else StartOrResume();
     }
 
     private void StartOrResume()
@@ -459,8 +491,10 @@ public sealed partial class HomeWindow : Window
 
     private void OnKey(object sender, KeyRoutedEventArgs args)
     {
-        if (args.Key != VirtualKey.Escape || _dialog) return;
-        GoBack();
+        if (args.Key != VirtualKey.Escape) return;
+        if (SettingsPicker.Visibility == Visibility.Visible) CloseSettingsPicker();
+        else if (_dialog) return;
+        else GoBack();
         args.Handled = true;
     }
 
@@ -487,7 +521,8 @@ public sealed partial class HomeWindow : Window
                 WindowsKeys.ActivateFocused(FocusManager.GetFocusedElement(Root.XamlRoot));
             if ((buttons & Controller.Back) != 0)
             {
-                if (_activeDialog is not null) _activeDialog.Hide();
+                if (SettingsPicker.Visibility == Visibility.Visible) CloseSettingsPicker();
+                else if (_activeDialog is not null) _activeDialog.Hide();
                 else if (!_dialog) GoBack();
             }
             if ((buttons & Controller.Menu) != 0 && !_dialog && Settings.Visibility == Visibility.Collapsed)

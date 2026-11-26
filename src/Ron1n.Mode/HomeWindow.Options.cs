@@ -1,8 +1,9 @@
 using System.Diagnostics;
+using System.Net.Http;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.Win32;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
@@ -11,8 +12,12 @@ namespace Ron1n.Mode;
 
 public sealed partial class HomeWindow
 {
-    private static readonly string[] SettingsCategories = ["Libreria", "Schermo e audio", "Comandi", "Avvio", "Aggiornamenti"];
-    private static readonly string[] SettingsIcons = ["\uE8B7", "\uE7F4", "\uE7FC", "\uE7E8", "\uE895"];
+    private static readonly string[] SettingsCategories = ["Libreria", "Schermo e audio", "Comandi", "Avvio", "Aggiornamenti", "Aspetto"];
+    private static readonly (string Id, string Label)[] GlassMaterials =
+        [("dark", "Scuro"), ("light", "Chiaro"), ("clear", "Trasparente"), ("accent", "Colore del gioco")];
+    private readonly List<Border> _categoryIndicators = [];
+    private int _settingsCategory = -1;
+    private Button? _settingsPickerOrigin;
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RunValue = "ConsoleMode";
 
@@ -22,19 +27,28 @@ public sealed partial class HomeWindow
         _hoverTimer?.Stop();
         Home.Visibility = Visibility.Collapsed;
         Settings.Visibility = Visibility.Visible;
-        if (Categories.Items.Count == 0)
+        if (Categories.Children.Count == 0)
             for (var index = 0; index < SettingsCategories.Length; index++)
             {
-                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-                row.Children.Add(new FontIcon { Glyph = SettingsIcons[index], FontSize = 18 });
-                row.Children.Add(new TextBlock { Text = SettingsCategories[index], VerticalAlignment = VerticalAlignment.Center });
-                var item = new ListViewItem { Content = row, MinHeight = 54 };
-                AutomationProperties.SetName(item, SettingsCategories[index]);
-                Categories.Items.Add(item);
+                var category = index;
+                var indicator = new Border { Width = 4, Height = 28, CornerRadius = new CornerRadius(2),
+                    HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(-13, 0, 0, 0), Background = (Brush)Application.Current.Resources["ConsoleAccentBrush"],
+                    Opacity = 0 };
+                var label = new TextBlock { Text = SettingsCategories[index], FontSize = 20,
+                    VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+                var row = new Grid();
+                row.Children.Add(indicator);
+                row.Children.Add(label);
+                var button = new Button { Style = ConsoleStyle("ConsoleCategory"), Content = row };
+                AutomationProperties.SetName(button, label.Text);
+                button.Click += (_, _) => SelectSettingsCategory(category);
+                button.GotFocus += (_, _) => SelectSettingsCategory(category);
+                _categoryIndicators.Add(indicator);
+                Categories.Children.Add(button);
             }
-        if (Categories.SelectedIndex < 0) Categories.SelectedIndex = 0;
-        else RenderSettings();
-        if (Categories.SelectedItem is Control selectedItem) selectedItem.Focus(FocusState.Programmatic);
+        SelectSettingsCategory(Math.Max(0, _settingsCategory), refresh: true);
+        ((Button)Categories.Children[_settingsCategory]).Focus(FocusState.Programmatic);
     }
 
     private void CloseSettings(object sender, RoutedEventArgs e)
@@ -44,46 +58,59 @@ public sealed partial class HomeWindow
         FocusSelection();
     }
 
-    private void SettingsCategoryChanged(object sender, SelectionChangedEventArgs e) => RenderSettings();
+    private void SelectSettingsCategory(int index, bool refresh = false)
+    {
+        if (_settingsCategory == index && !refresh) return;
+        _settingsCategory = index;
+        for (var category = 0; category < _categoryIndicators.Count; category++)
+        {
+            var selected = category == index;
+            _categoryIndicators[category].Opacity = selected ? 1 : 0;
+            AutomationProperties.SetItemStatus(Categories.Children[category], selected ? "Selezionata" : "");
+        }
+        RenderSettings();
+    }
 
     private void RenderSettings()
     {
-        if (Categories.SelectedIndex < 0) return;
         SettingsRows.Children.Clear();
-        SettingsRows.Children.Add(new TextBlock { Text = SettingsCategories[Categories.SelectedIndex], FontSize = 28,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) });
 
-        switch (Categories.SelectedIndex)
+        switch (_settingsCategory)
         {
             case 0:
-                var folder = Field(SettingsRows, "Cartella giochi", _preferences.GamesFolder);
+                var folderValue = SettingValue(string.IsNullOrEmpty(_preferences.GamesFolder) ? "Non impostata" : _preferences.GamesFolder);
+                AddSettingRow("Cartella giochi", folderValue, async () =>
+                {
+                    var panel = new StackPanel();
+                    var folder = Field(panel, "Percorso", _preferences.GamesFolder);
+                    if (!await ShowDialog("Cartella giochi", panel)) return;
+                    await UpdateFolder(folder.Text.Trim().Trim('"'));
+                });
                 AddSettingAction("Sfoglia", async () =>
                 {
                     var picker = new FolderPicker();
                     picker.FileTypeFilter.Add("*");
                     InitializeWithWindow.Initialize(picker, _handle);
                     var selected = await picker.PickSingleFolderAsync();
-                    if (selected is null) return;
-                    folder.Text = selected.Path;
-                    await SaveFolder(selected.Path);
+                    if (selected is not null) await UpdateFolder(selected.Path);
                 });
-                AddSettingAction("Salva cartella e aggiorna libreria", () => SaveFolder(folder.Text.Trim().Trim('"')));
+                async Task UpdateFolder(string path)
+                {
+                    await SaveFolder(path);
+                    folderValue.Text = string.IsNullOrEmpty(path) ? "Non impostata" : path;
+                }
                 break;
             case 1:
-                var displays = DisplayArea.FindAll().Select((area, index) => new DisplayChoice(area.DisplayId.Value.ToString(),
-                    $"Schermo {index + 1} · {area.OuterBounds.Width} × {area.OuterBounds.Height}" + (area.IsPrimary ? " · Principale" : ""))).ToArray();
+                var displays = FindDisplayAreas().Select((area, index) => new DisplayChoice(area.DisplayId.Value.ToString(),
+                    $"Schermo {index + 1} · {area.OuterBounds.Width} × {area.OuterBounds.Height}" + (area.IsPrimary ? " · Principale" : ""), area.IsPrimary)).ToArray();
                 var current = displays.FirstOrDefault(display => display.Id == _preferences.Screen)
-                    ?? displays.FirstOrDefault(display => display.Id == DisplayArea.Primary.DisplayId.Value.ToString());
-                var screen = new ComboBox { Header = "Schermo della home", ItemsSource = displays,
-                    SelectedItem = current, MinWidth = 300 };
-                screen.SelectionChanged += (_, _) =>
+                    ?? displays.FirstOrDefault(display => display.IsPrimary);
+                AddSettingChoice("Schermo della home", displays, current, display =>
                 {
-                    if (screen.SelectedItem is not DisplayChoice display) return;
                     _preferences.Screen = display.Id;
                     Save();
                     PlaceHome();
-                };
-                SettingsRows.Children.Add(screen);
+                });
                 AddSettingAction("Uscita audio di Windows", () =>
                 {
                     Process.Start(new ProcessStartInfo("ms-settings:sound") { UseShellExecute = true });
@@ -92,28 +119,21 @@ public sealed partial class HomeWindow
                 break;
             case 2:
                 var keys = new[] { "Disattivata", "F8", "F9", "F10", "F11", "F12" };
-                var keyboard = new ComboBox { Header = "Torna alla home · Ctrl + Alt", ItemsSource = keys,
-                    SelectedItem = _preferences.KeyboardShortcut, MinWidth = 300 };
-                keyboard.SelectionChanged += (_, _) =>
+                AddSettingChoice("Torna alla home · Ctrl + Alt", keys, _preferences.KeyboardShortcut, shortcut =>
                 {
-                    _preferences.KeyboardShortcut = keyboard.SelectedItem as string ?? "Disattivata";
+                    _preferences.KeyboardShortcut = shortcut;
                     SetKeyboardShortcut();
                     Save();
-                };
-                SettingsRows.Children.Add(keyboard);
+                });
                 var options = new[] { new ShortcutChoice("Disattivata", 0),
                     new ShortcutChoice("Visualizza / Crea / − + tasto in alto", Controller.View | Controller.Y),
                     new ShortcutChoice("Menu / Opzioni / + e Visualizza / Crea / −", Controller.Menu | Controller.View) };
-                var controller = new ComboBox { Header = "Torna alla home · Controller", ItemsSource = options,
-                     MinWidth = 300,
-                    SelectedItem = options.FirstOrDefault(option => option.Mask == _preferences.ControllerShortcut) };
-                controller.SelectionChanged += (_, _) =>
-                {
-                    if (controller.SelectedItem is not ShortcutChoice option) return;
-                    _preferences.ControllerShortcut = option.Mask;
-                    Save();
-                };
-                SettingsRows.Children.Add(controller);
+                AddSettingChoice("Torna alla home · Controller", options,
+                    options.FirstOrDefault(option => option.Mask == _preferences.ControllerShortcut), option =>
+                    {
+                        _preferences.ControllerShortcut = option.Mask;
+                        Save();
+                    });
                 break;
             case 3:
                 using (var key = Registry.CurrentUser.OpenSubKey(RunKey))
@@ -129,10 +149,23 @@ public sealed partial class HomeWindow
                 AddToggle("Ricevi anche le beta", _preferences.BetaUpdates, enabled => { _preferences.BetaUpdates = enabled; Save(); });
                 AddSettingAction("Controlla aggiornamenti adesso", () => CheckUpdate(true));
                 break;
+            case 5:
+                var index = Math.Max(0, Array.FindIndex(GlassMaterials, option => option.Id == _preferences.CardMaterial));
+                var material = SettingValue(GlassMaterials[index].Label);
+                AddSettingRow("Materiale Glass", material, () =>
+                {
+                    index = (index + 1) % GlassMaterials.Length;
+                    _preferences.CardMaterial = GlassMaterials[index].Id;
+                    ApplyGlassMaterial();
+                    Save();
+                    material.Text = GlassMaterials[index].Label;
+                    return Task.CompletedTask;
+                });
+                break;
         }
     }
 
-    private sealed record DisplayChoice(string Id, string Label) { public override string ToString() => Label; }
+    private sealed record DisplayChoice(string Id, string Label, bool IsPrimary) { public override string ToString() => Label; }
     private sealed record ShortcutChoice(string Label, int Mask) { public override string ToString() => Label; }
 
     private async Task SaveFolder(string folder)
@@ -144,22 +177,124 @@ public sealed partial class HomeWindow
 
     private void AddToggle(string label, bool enabled, Action<bool> change)
     {
-        var control = new ToggleSwitch { Header = label, IsOn = enabled };
-        control.Toggled += (_, _) =>
+        var value = SettingValue(enabled ? "Attivo" : "Disattivato");
+        AddSettingRow(label, value, () =>
         {
-            try { change(control.IsOn); }
-            catch (Exception ex) { Report(ex.Message); }
-        };
-        SettingsRows.Children.Add(control);
+            change(!enabled);
+            enabled = !enabled;
+            value.Text = enabled ? "Attivo" : "Disattivato";
+            return Task.CompletedTask;
+        });
     }
 
-    private void AddSettingAction(string title, Func<Task> action)
+    private void AddSettingChoice<T>(string title, T[] choices, T? current, Action<T> apply) where T : class
     {
-        var button = new Button { Content = title, Padding = new Thickness(16, 9, 16, 9) };
-        AddInteractionMotion(button, 1.025);
-        button.Click += async (_, _) => await RunAction(action);
-        SettingsRows.Children.Add(button);
+        var labels = choices.Select(choice => choice.ToString() ?? "").ToArray();
+        var selected = Array.IndexOf(choices, current);
+        var value = SettingValue(selected < 0 ? "Non impostato" : labels[selected]);
+        var button = AddSettingRow(title, value);
+        button.IsEnabled = choices.Length > 0;
+        button.Click += (_, _) => OpenSettingsPicker(button, title, labels, selected, index =>
+        {
+            apply(choices[index]);
+            selected = index;
+            value.Text = labels[index];
+        });
     }
+
+    private void AddSettingAction(string title, Func<Task> action) =>
+        AddSettingRow(title, new FontIcon { Glyph = "\uE76C", FontSize = 14, HorizontalAlignment = HorizontalAlignment.Right }, action);
+
+    private Button AddSettingRow(string title, FrameworkElement accessory, Func<Task>? action = null)
+    {
+        var row = new Grid { ColumnSpacing = 12 };
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = accessory is TextBlock ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+        Grid.SetColumn(accessory, 1);
+        row.Children.Add(SettingLabel(title));
+        row.Children.Add(accessory);
+        var button = new Button { Style = ConsoleStyle("ConsoleRow"), Content = row };
+        AutomationProperties.SetName(button, title);
+        if (accessory is TextBlock value)
+        {
+            AutomationProperties.SetItemStatus(button, value.Text);
+            value.RegisterPropertyChangedCallback(TextBlock.TextProperty, (_, _) => AutomationProperties.SetItemStatus(button, value.Text));
+        }
+        if (action is not null) button.Click += async (_, _) => await RunAction(action);
+        SettingsRows.Children.Add(button);
+        return button;
+    }
+
+    private void OpenSettingsPicker(Button origin, string title, string[] options, int selected, Action<int> apply)
+    {
+        if (_dialog || options.Length == 0) return;
+        _dialog = true;
+        _settingsPickerOrigin = origin;
+        SettingsPickerTitle.Text = title;
+        for (var index = 0; index < options.Length; index++)
+        {
+            var option = index;
+            var row = new Grid { ColumnSpacing = 16 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            if (index == selected)
+                row.Children.Add(new FontIcon { Glyph = "\uE73E", FontSize = 20,
+                    Foreground = (Brush)Application.Current.Resources["ConsoleAccentBrush"] });
+            var label = SettingLabel(options[index]);
+            Grid.SetColumn(label, 1);
+            row.Children.Add(label);
+            var button = new Button { Style = ConsoleStyle("ConsoleRow"), Content = row };
+            AutomationProperties.SetName(button, options[index]);
+            if (index == selected) AutomationProperties.SetItemStatus(button, "Selezionata");
+            button.Click += async (_, _) =>
+            {
+                CloseSettingsPicker();
+                await RunAction(() => { apply(option); return Task.CompletedTask; });
+            };
+            SettingsPickerOptions.Children.Add(button);
+        }
+        Settings.Visibility = Visibility.Collapsed;
+        SettingsPicker.Visibility = Visibility.Visible;
+        var focused = (Button)SettingsPickerOptions.Children[Math.Max(0, selected)];
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_settingsPickerOrigin != origin) return;
+            SettingsPicker.UpdateLayout();
+            focused.Focus(FocusState.Keyboard);
+        });
+    }
+
+    private void CancelSettingsPicker(object sender, RoutedEventArgs e) => CloseSettingsPicker();
+
+    private void CloseSettingsPicker()
+    {
+        var origin = _settingsPickerOrigin;
+        _settingsPickerOrigin = null;
+        SettingsPicker.Visibility = Visibility.Collapsed;
+        SettingsPickerOptions.Children.Clear();
+        Settings.Visibility = Visibility.Visible;
+        _dialog = false;
+        Settings.UpdateLayout();
+        origin?.Focus(FocusState.Keyboard);
+    }
+
+    private static TextBlock SettingLabel(string title) => new()
+    {
+        Text = title, FontSize = 20, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap
+    };
+
+    private static TextBlock SettingValue(string value)
+    {
+        var label = SettingLabel(value);
+        label.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+        label.Foreground = (Brush)Application.Current.Resources["ConsoleAccentBrush"];
+        label.TextAlignment = TextAlignment.Right;
+        label.TextTrimming = TextTrimming.CharacterEllipsis;
+        label.MaxLines = 2;
+        return label;
+    }
+
+    private static Style ConsoleStyle(string key) => (Style)Application.Current.Resources[key];
 
     private async Task RunAction(Func<Task> action)
     {
@@ -201,8 +336,6 @@ public sealed partial class HomeWindow
         var menu = new MenuFlyout();
         Add("Modifica gioco", () => EditGame(game));
         Add("Cerca un altro titolo", () => SearchArtwork(game));
-        Add("Scegli immagine card", () => PickImage(game, false));
-        Add("Scegli immagine sfondo", () => PickImage(game, true));
         if (game.Source == "Manuale")
             Add("Rimuovi dalla libreria", async () =>
             {
@@ -247,34 +380,71 @@ public sealed partial class HomeWindow
         await ReloadGames(game.Id);
     }
 
-    private async Task PickImage(Game game, bool background)
-    {
-        _artwork?.Cancel();
-        var path = await PickFile(".jpg", ".jpeg", ".png", ".webp");
-        if (path is null) return;
-        var art = _preferences.For(game);
-        var image = Preferences.StoreImage(game.Id, background ? "background" : "card", path);
-        if (background) art.Background = image;
-        else art.Card = image;
-        Save();
-        if (SelectedGame?.Id == game.Id) UpdateHero(false, false);
-    }
-
     private async Task SearchArtwork(Game game)
     {
         _artwork?.Cancel();
-        var panel = new StackPanel { Spacing = 10, MinWidth = 345 };
-        var query = Field(panel, "Titolo da cercare", game.Title);
-        var search = new Button { Content = "Cerca" };
+        var panel = new StackPanel { Spacing = 10, MinWidth = 460 };
+        var presentation = _preferences.For(game);
+        var query = Field(panel, "Titolo da cercare", CatalogSearchTitle(game, presentation));
+        var search = new Button { Content = "Cerca", Style = ConsoleStyle("ConsoleDialogButton") };
         var results = new ListView { MinHeight = 100, MaxHeight = 230 };
         var message = new TextBlock { TextWrapping = TextWrapping.Wrap };
         panel.Children.Add(search);
         panel.Children.Add(message);
         panel.Children.Add(results);
+        var previewTitle = new TextBlock { FontSize = 18, TextWrapping = TextWrapping.Wrap };
+        var previewMedia = new Grid { ColumnSpacing = 12 };
+        previewMedia.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(124) });
+        previewMedia.ColumnDefinitions.Add(new ColumnDefinition());
+        var coverImage = AddPreviewImage(previewMedia, 0, "Card", 124);
+        var backgroundImage = AddPreviewImage(previewMedia, 1, "Sfondo", 220);
+        var previewPanel = new StackPanel { Spacing = 8, Visibility = Visibility.Collapsed };
+        previewPanel.Children.Add(previewTitle);
+        previewPanel.Children.Add(previewMedia);
+        panel.Children.Add(previewPanel);
         using var cancellation = new CancellationTokenSource();
+        CancellationTokenSource? previewRequest = null;
+        ArtworkPreview? preview = null;
         var dialog = CreateDialog("Cerca un altro titolo", panel);
         dialog.IsPrimaryButtonEnabled = false;
-        results.SelectionChanged += (_, _) => dialog.IsPrimaryButtonEnabled = results.SelectedItem is ArtworkMatch;
+        results.SelectionChanged += async (_, _) =>
+        {
+            previewRequest?.Cancel();
+            previewRequest = null;
+            dialog.IsPrimaryButtonEnabled = false;
+            coverImage.Source = backgroundImage.Source = null;
+            preview?.Dispose();
+            preview = null;
+            previewPanel.Visibility = Visibility.Collapsed;
+            if (cancellation.IsCancellationRequested || results.SelectedItem is not ArtworkMatch match) return;
+
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token);
+            previewRequest = request;
+            previewPanel.Visibility = Visibility.Visible;
+            previewTitle.Text = "Caricamento anteprima…";
+            ArtworkPreview? loaded = null;
+            try
+            {
+                loaded = await PrepareArtworkPreview(match, request.Token);
+                request.Token.ThrowIfCancellationRequested();
+                coverImage.Source = LoadImage(loaded.Cover, 352);
+                backgroundImage.Source = LoadImage(loaded.Background, 768);
+                previewTitle.Text = match.Label;
+                preview = loaded;
+                loaded = null;
+                dialog.IsPrimaryButtonEnabled = true;
+            }
+            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                if (!request.IsCancellationRequested) previewTitle.Text = "Anteprima non disponibile: " + ex.Message;
+            }
+            finally
+            {
+                loaded?.Dispose();
+                if (ReferenceEquals(previewRequest, request)) previewRequest = null;
+            }
+        };
         search.Click += async (_, _) =>
         {
             search.IsEnabled = false;
@@ -285,7 +455,7 @@ public sealed partial class HomeWindow
                 var found = await GameCatalog.SearchAsync(query.Text.Trim(), cancellation.Token);
                 results.ItemsSource = found;
                 results.SelectedIndex = found.Count == 1 ? 0 : -1;
-                message.Text = found.Count == 0 ? "Nessun titolo trovato." : "Seleziona il risultato da abbinare.";
+                message.Text = found.Count > 0 ? "Seleziona un risultato per vedere l’anteprima." : "Nessun titolo trovato su LaunchBox.";
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) { message.Text = "Ricerca non disponibile: " + ex.Message; }
@@ -299,8 +469,65 @@ public sealed partial class HomeWindow
         };
         var apply = await ShowDialog(dialog);
         cancellation.Cancel();
-        if (apply && results.SelectedItem is ArtworkMatch match)
-            await LoadArtwork(game, match, true, CancellationToken.None);
+        coverImage.Source = backgroundImage.Source = null;
+        using (preview)
+            if (apply && preview is not null)
+                ApplyArtwork(game, preview.Match, preview.Artwork, preview.Cover, preview.Background, replace: true);
+    }
+
+    private static Image AddPreviewImage(Grid grid, int column, string label, double width)
+    {
+        var image = new Image { Stretch = Stretch.Uniform };
+        AutomationProperties.SetName(image, label);
+        var media = new Grid { Width = width, Height = 124, CornerRadius = new CornerRadius(14),
+            Background = (Brush)Application.Current.Resources["GlassFill"] };
+        media.Children.Add(new TextBlock { Text = "Non disponibile", HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center, Opacity = .67 });
+        media.Children.Add(image);
+        var stack = new StackPanel { Spacing = 5, HorizontalAlignment = HorizontalAlignment.Left };
+        stack.Children.Add(new TextBlock { Text = label });
+        stack.Children.Add(media);
+        Grid.SetColumn(stack, column);
+        grid.Children.Add(stack);
+        return image;
+    }
+
+    private static async Task<ArtworkPreview> PrepareArtworkPreview(ArtworkMatch match, CancellationToken token)
+    {
+        var content = await GameCatalog.GetAsync(match, token);
+        string? cover = null;
+        string? background = null;
+        try
+        {
+            await Task.WhenAll(LoadCover(), LoadBackground());
+            token.ThrowIfCancellationRequested();
+            return new ArtworkPreview(match, content, cover, background);
+        }
+        catch
+        {
+            if (cover is not null) File.Delete(cover);
+            if (background is not null) File.Delete(background);
+            throw;
+        }
+
+        async Task LoadCover() => cover = await Download(content.Cover);
+        async Task LoadBackground() => background = await Download(content.Background);
+
+        async Task<string?> Download(Uri? uri)
+        {
+            try { return await GameCatalog.DownloadAsync(uri, token); }
+            catch (HttpRequestException) { return null; }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { return null; }
+        }
+    }
+
+    private sealed record ArtworkPreview(ArtworkMatch Match, GameArtwork Artwork, string? Cover, string? Background) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (Cover is not null) File.Delete(Cover);
+            if (Background is not null) File.Delete(Background);
+        }
     }
 
     private void ScheduleArtwork(Game? game)
@@ -308,8 +535,8 @@ public sealed partial class HomeWindow
         _artwork?.Cancel();
         if (game is null || _session is not null || _dialog) return;
         var art = _preferences.For(game);
-        var hasCatalog = art.ArtworkId is not null || art.CatalogId.Length > 0;
-        if ((hasCatalog && File.Exists(art.Background)) || !_fetched.Add(game.Id)) return;
+        var complete = art.IsLaunchBox && art.HasCatalogMedia && File.Exists(art.Card) && File.Exists(art.Background);
+        if (complete || !_fetched.Add(game.Id)) return;
         var lookup = new CancellationTokenSource();
         _artwork = lookup;
         _ = AutoArtwork(game, lookup);
@@ -321,18 +548,23 @@ public sealed partial class HomeWindow
         {
             await Task.Delay(650, lookup.Token);
             var art = _preferences.For(game);
-            var match = art.CatalogId.StartsWith("wikipedia:", StringComparison.Ordinal)
-                ? new ArtworkMatch(null, game.Title, art.CatalogId["wikipedia:".Length..], art.Description)
-                : (art.ArtworkId ?? game.SteamId) is { } id ? new ArtworkMatch(id, game.Title) : null;
-            if (match is null)
+            ArtworkMatch? match = null;
+            var title = CatalogSearchTitle(game, art);
+            if (art.IsLaunchBox && Uri.TryCreate(art.CatalogUrl, UriKind.Absolute, out var page) && GameCatalog.IsLaunchBoxPage(page))
+                match = new ArtworkMatch(title, page);
+            else
             {
-                var found = await GameCatalog.SearchAsync(game.Title, lookup.Token);
-                var matches = found.Where(result => GameCatalog.Normalize(result.Title) == GameCatalog.Normalize(game.Title)).ToList();
-                var steamMatches = matches.Where(result => result.SteamId.HasValue).Take(2).ToList();
-                if (steamMatches.Count == 1) match = steamMatches[0];
+                var found = await GameCatalog.SearchAsync(title, lookup.Token);
+                var normalizedTitle = GameCatalog.Normalize(title);
+                var matches = found.Where(result => GameCatalog.Normalize(result.Title) == normalizedTitle).ToList();
+                var platform = art.CatalogDetails.FirstOrDefault();
+                if (platform == "PC" || game.SteamId.HasValue) platform = "Windows";
+                var preferred = matches.Where(result => string.Equals(result.Platform, platform, StringComparison.OrdinalIgnoreCase))
+                    .Take(2).ToList();
+                if (preferred.Count == 1) match = preferred[0];
                 else if (matches.Count == 1) match = matches[0];
             }
-            if (match is not null) await LoadArtwork(game, match, false, lookup.Token);
+            if (match is not null) await LoadArtwork(game, match, replace: !art.HasCatalogMedia || art.CatalogId != match.Id, lookup.Token);
         }
         catch (OperationCanceledException) { _fetched.Remove(game.Id); }
         catch (Exception ex) { Debug.WriteLine(ex); }
@@ -343,14 +575,18 @@ public sealed partial class HomeWindow
         }
     }
 
+    private static string CatalogSearchTitle(Game game, Presentation art)
+    {
+        const string legacyPrefix = "wikipedia:";
+        if (!string.IsNullOrWhiteSpace(art.CatalogTitle)) return art.CatalogTitle;
+        if (art.CatalogId.StartsWith(legacyPrefix, StringComparison.Ordinal))
+            return Uri.UnescapeDataString(art.CatalogId[legacyPrefix.Length..]).Replace('_', ' ');
+        return game.Title;
+    }
+
     private async Task LoadArtwork(Game game, ArtworkMatch match, bool replace, CancellationToken token)
     {
         var content = await GameCatalog.GetAsync(match, token);
-        if (content is null)
-        {
-            if (replace) Report("Contenuti non disponibili per il titolo selezionato.");
-            return;
-        }
         var art = _preferences.For(game);
         string? cover = null;
         string? backdrop = null;
@@ -359,13 +595,7 @@ public sealed partial class HomeWindow
             if (replace || !File.Exists(art.Card)) cover = await GameCatalog.DownloadAsync(content.Cover, token);
             if (replace || !File.Exists(art.Background)) backdrop = await GameCatalog.DownloadAsync(content.Background, token);
             token.ThrowIfCancellationRequested();
-            if (cover is not null && (replace || !File.Exists(art.Card))) art.Card = Preferences.StoreImage(game.Id, "card", cover);
-            if (backdrop is not null && (replace || !File.Exists(art.Background))) art.Background = Preferences.StoreImage(game.Id, "background", backdrop);
-            art.Description = content.Description;
-            art.ArtworkId = match.SteamId;
-            art.CatalogId = match.Id;
-            Save();
-            if (SelectedGame?.Id == game.Id) UpdateHero(false, false);
+            ApplyArtwork(game, match, content, cover, backdrop, replace);
         }
         finally
         {
@@ -374,9 +604,27 @@ public sealed partial class HomeWindow
         }
     }
 
+    private void ApplyArtwork(Game game, ArtworkMatch match, GameArtwork content, string? cover, string? background, bool replace)
+    {
+        var art = _preferences.For(game);
+        var cardPath = cover is not null ? Preferences.StoreImage(game.Id, "card", cover) : replace ? "" : art.Card;
+        var backgroundPath = background is not null ? Preferences.StoreImage(game.Id, "background", background) : replace ? "" : art.Background;
+        art.Card = cardPath;
+        art.Background = backgroundPath;
+        art.CoverAspect = cardPath.Length > 0 ? content.CoverAspect : 0;
+        art.HasCatalogMedia = true;
+        art.Description = content.Description;
+        art.CatalogId = match.Id;
+        art.CatalogTitle = match.Title;
+        art.CatalogUrl = match.Page.AbsoluteUri;
+        art.CatalogDetails = content.Details;
+        Save();
+        if (SelectedGame?.Id == game.Id) UpdateHero(false, false);
+    }
+
     private static TextBox Field(Panel panel, string title, string value)
     {
-        var field = new TextBox { Header = title, Text = value, MinWidth = 310 };
+        var field = new TextBox { Header = title, Text = value, Style = ConsoleStyle("ConsoleTextField") };
         panel.Children.Add(field);
         return field;
     }
@@ -384,7 +632,12 @@ public sealed partial class HomeWindow
     private ContentDialog CreateDialog(string title, object content, string confirm = "Applica") => new()
     {
         XamlRoot = Root.XamlRoot, Title = title, Content = content, PrimaryButtonText = confirm,
-        CloseButtonText = "Annulla", DefaultButton = ContentDialogButton.Primary
+        CloseButtonText = "Annulla", DefaultButton = ContentDialogButton.Primary,
+        Background = (Brush)Application.Current.Resources["GlassFill"],
+        BorderBrush = (Brush)Application.Current.Resources["GlassEdge"],
+        CornerRadius = new CornerRadius(24),
+        PrimaryButtonStyle = ConsoleStyle("ConsoleDialogButton"),
+        CloseButtonStyle = ConsoleStyle("ConsoleDialogButton")
     };
 
     private Task<bool> ShowDialog(string title, FrameworkElement content) => ShowDialog(CreateDialog(title, content));

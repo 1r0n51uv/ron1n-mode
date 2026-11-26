@@ -7,5 +7,6 @@
   <ItemGroup>
     <Compile Include="../../src/Ron1n.Mode/GlobalUsings.cs" Link="GlobalUsings.cs" />
     <Compile Include="../../src/Ron1n.Mode/GameArtwork.cs" Link="GameArtwork.cs" />
+    <Compile Include="../../src/Ron1n.Mode/LaunchBoxArtwork.cs" Link="LaunchBoxArtwork.cs" />
   </ItemGroup>
 </Project>

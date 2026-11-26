@@ -6,7 +6,7 @@ Home Windows a schermo intero per avviare singoli giochi e app dal divano. Inter
 
 - Libreria di eseguibili aggiunti a mano, cartella giochi configurabile e titoli Steam ed Epic installati.
 - Ultimo gioco preselezionato, ritorno alla home con scorciatoia e ripresa della finestra esistente.
-- Schede da Steam e Wikipedia, ricerca con titolo alternativo e immagini locali. Gli sfondi dipendono dalla fonte.
+- Schede e immagini dal catalogo multipiattaforma LaunchBox. La ricerca per titolo mostra in anteprima copertina e sfondo prima di applicare l’abbinamento.
 - Avvio a schermo intero all'accesso, impostazione dello schermo e accesso alle uscite audio di Windows.
 
 ## Build su Windows x64
